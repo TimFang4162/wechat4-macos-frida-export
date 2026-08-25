@@ -1,0 +1,3 @@
+frida-tools
+pycryptodome>=3.20
+zstandard>=0.22
