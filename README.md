@@ -1,56 +1,71 @@
-# wechat-frida-export
+# wechat4-macos-export
 
-macOS 微信聊天记录一键解密导出工具。支持 **微信 4.1.10+（含 4.1.13）**——即进程内存
-不再缓存 `x'<hexkey>'` 密钥串、传统内存扫描方案全部失效的新版本。
+macOS 平台微信（WeChat 4.x）本地聊天记录解密与导出工具。针对微信 4.1.10 起
+的密钥存储机制变更，采用 Frida 运行时拦截方式获取各数据库的 SQLCipher 密钥，
+随后完成解密与批量导出。
 
-```
-微信进程 ──Frida hook──▶ 32字节raw key ──HMAC验证──▶ all_keys.json
-(CommonCrypto)            (CCCryptorCreate等)        (逐库映射)
-        ──▶ 明文 SQLite ──▶ TXT / CSV / JSON（全部会话批量导出）
-```
+## 适用范围
 
-## 与旧方案的区别（为什么需要这个工具）
+- 操作系统：macOS（Apple Silicon 与 Intel）
+- 微信版本：4.x。重点针对 4.1.10 及以上版本。自该版本起，既有方法失效：
+  进程内存中不再出现 `x'<key><salt>'` 形式的密钥字符串，内存扫描无结果；
+  二进制中 SQLCipher 符号被完全剥离，`sqlite3_key` 断点无法解析
+- 系统完整性保护（SIP）须处于关闭状态。SIP 开启时外部进程无法读取微信
+  进程内存；新版 macOS 的 App Management 亦不允许对 `/Applications` 下的
+  微信原地重签名
 
-微信 4.1.10 起（macOS）：
+验证环境：微信 4.1.13，macOS 27（Apple Silicon），SIP 关闭。23 个数据库中
+22 个解密成功，358 个会话、约 70 万条消息完成导出。以上数据仅代表单一
+环境的测试结果。
 
-- **内存扫描 `x'<key><salt>'` 失效** —— 密钥字符串不再常驻内存
-- **`sqlite3_key` lldb 断点失效** —— 符号被完全剥离
-- **Xcode lldb 直接 attach 会崩溃** —— 解析微信巨型 Mach-O 符号表时递归爆栈
-  （`ObjectFileMachO::ParseSymtab → ParseTrieEntries`）
+## 工作原理
 
-本工具改用 **Frida hook CommonCrypto**：微信的 WCDB 以 CommonCrypto 为 AES 后端，
-派生后的 per-DB raw key 必然经过 `CCCrypt` / `CCCryptorCreate` /
-`CCCryptorCreateWithMode`；`CCKeyDerivationPBKDF`（mac key 派生，rounds=2）也会
-带出 raw key。重启微信让全部数据库重新打开，即可一次性抓齐所有库的密钥。
+微信 4.x 使用 WCDB（SQLCipher 4）加密本地数据库。加密参数：AES-256-CBC、
+HMAC-SHA512、reserve=80、页大小 4096。每个数据库持有独立的 32 字节 raw key。
 
-## 前置条件
+4.1.10 起，raw key 不再以字符串形式驻留可扫描内存，仅在加解密调用时经过
+系统加密库。本工具的处理流程：
 
-- macOS（Apple Silicon / Intel），**SIP 已关闭**（`csrutil status` 为 disabled）。
-  SIP 开启时无法读取其他进程内存（除非重签微信，但新版 macOS 无法原地重签）
-- 微信 4.x 桌面版已登录
+1. 以 Frida 附加微信进程，拦截 CommonCrypto 的 `CCCrypt`、`CCCryptorCreate`、
+   `CCCryptorCreateWithMode` 与 `CCKeyDerivationPBKDF`。参数中的 32 字节密钥
+   即数据库 raw key（`CCKeyDerivationPBKDF` 的 password 参数为同一密钥，
+   用于派生 HMAC 校验密钥，rounds=2，SHA-512）
+2. 重启微信，使全部数据库重新打开；密钥在派生与使用时刻被记录至
+   `hunted_keys.txt`
+3. 以候选密钥对各数据库首页做 HMAC-SHA512 校验，建立密钥与数据库的映射，
+   生成 `all_keys.json`
+4. 按页解密数据库，输出明文 SQLite 至 `decrypted/`
+5. 批量读取全部会话，导出为 TXT / CSV / JSON
+
+不使用 lldb 的原因：Xcode 自带的 lldb 在解析微信主程序 Mach-O 符号表时，
+因导出 trie 递归过深而崩溃（`ObjectFileMachO::ParseSymtab →
+ParseTrieEntries`，栈溢出），进程附加阶段即失败。
+
+## 环境要求
+
+- macOS，SIP 关闭（`csrutil status` 返回 disabled）
+- 微信 4.x 桌面版，处于已登录状态
 - Python 3.9+，Xcode Command Line Tools
-- 一次管理员密码（抓密钥时弹系统授权框）
+- 一次管理员密码输入（密钥抓取阶段通过系统授权框提权）
 
-## 快速开始
+## 使用方法
 
 ```bash
 ./run.sh
 ```
 
-一条命令完成全部流程：
+`run.sh` 依次执行：
 
-1. 创建 venv 并安装依赖（frida / pycryptodome / zstandard）
+1. 创建 `.venv` 并安装依赖（frida-tools、pycryptodome、zstandard）
 2. 自动检测微信数据目录，生成 `config.json`
-3. 弹出管理员授权框 → Frida 挂到微信进程挂钩子 → **自动重启微信**触发全部
-   数据库重新打开 → 抓齐密钥（静默 45 秒无新密钥自动停止）
-4. 逐库 HMAC 验证映射密钥 → `all_keys.json`
-5. 逐页解密 SQLCipher 4 数据库 → `decrypted/`
-6. 批量导出全部会话 → `exported_all/`
+3. 运行 `hunt_keys.py`：弹出管理员授权框，Frida 附加微信进程并挂钩；
+   随后重启微信以触发全部数据库重新打开；连续 45 秒未出现新密钥时自动
+   停止并脱离。微信登录状态在重启后保留；若出现登录界面，手动确认一次
+4. 运行 `map_keys.py`：验证并映射密钥
+5. 运行 `decrypt_db.py`：解密全部数据库
+6. 运行 `export_all.py`：批量导出全部会话
 
-> 微信重启说明：需要触发数据库重新打开才能抓齐密钥；登录状态自动保留，
-> 若弹出登录界面点一下即可。
-
-### 只重新导出（密钥未变时）
+密钥未变化时（例如仅获取迁移后的新消息），可跳过抓取步骤：
 
 ```bash
 ./run.sh --no-hunt
@@ -59,85 +74,87 @@ macOS 微信聊天记录一键解密导出工具。支持 **微信 4.1.10+（含
 ### 分步执行
 
 ```bash
-.venv/bin/python hunt_keys.py --restart   # 抓密钥（自动弹授权框）
-.venv/bin/python map_keys.py              # 验证并映射密钥
-.venv/bin/python decrypt_db.py            # 解密全部数据库
-.venv/bin/python export_all.py            # 批量导出全部会话
+.venv/bin/python hunt_keys.py --restart   # 抓取密钥
+.venv/bin/python map_keys.py              # 验证并映射
+.venv/bin/python decrypt_db.py            # 解密
+.venv/bin/python export_all.py            # 批量导出
 
-# 单会话工具（模糊搜索昵称/备注）
-.venv/bin/python export_chat.py --list
-.venv/bin/python export_chat.py --name "张三" --output ~/Downloads/张三
+.venv/bin/python export_chat.py --list    # 列出会话（按消息数排序）
+.venv/bin/python export_chat.py --name "联系人昵称或备注" --output ./output
 ```
 
 ## 输出
 
 ```
 exported_all/
-├── index.csv            # 总索引：显示名/用户名/消息数/时间范围/目录
+├── index.csv            # 会话索引：显示名、用户名、消息数、时间范围、目录
 └── chats/<会话名>/
-    ├── chat.txt         # 可直接阅读（[时间] 发送者: 内容）
-    ├── chat.csv         # Excel/Numbers 可打开
+    ├── chat.txt         # 纯文本，格式为 [时间] 发送者: 内容
+    ├── chat.csv         # 表格，UTF-8 BOM，Excel / Numbers 可直接打开
     └── chat.json        # 结构化数据
 ```
 
-导出特性：
+导出内容说明：
 
-- **zstd 压缩消息解码** —— 微信 4.x 约一半消息以 `WCDB_CT=4`（zstd）压缩存储，
-  本工具全部解压为可读文本，不丢消息
-- **群聊发言人显示昵称**（通过联系人库解析 wxid）
-- **账号主人自动识别**（跨会话出现频率最高的发送者，标注为「我」）
+- 微信 4.x 约半数消息以 `WCDB_CT_message_content=4`（zstd）压缩存储，
+  导出时全部解压为文本，不产生占位符
+- 群聊发言人解析为联系人昵称；无法解析时保留 wxid
+- 发送者为本账号的消息标注为「我」。账号通过跨会话发送频率统计自动识别
+- 图片、语音、视频等媒体消息以 `[图片]`、`[语音]` 等占位符表示；
+  媒体文件本体不在导出范围内
+- 链接、小程序等应用消息保留原始 XML
 
 ## 文件说明
 
 | 文件 | 说明 |
 |------|------|
-| `hunt_keys.py` | Frida 密钥抓取器，自动经 osascript 提权，支持重启微信、静默自动停止 |
-| `keyhunt_frida.js` | 注入脚本：hook CCCrypt / CCCryptorCreate / CCKeyDerivationPBKDF |
+| `hunt_keys.py` | 密钥抓取器。非 root 运行时经 osascript 提权重启自身；支持重启微信、进程退出后自动重新附加、静默超时自动停止 |
+| `keyhunt_frida.js` | Frida 注入脚本，拦截 CommonCrypto 各入口并上报密钥与 KDF 参数 |
 | `map_keys.py` | 候选密钥逐库 HMAC-SHA512 验证，生成 `all_keys.json` |
-| `decrypt_db.py` | SQLCipher 4 逐页解密（AES-256-CBC, HMAC-SHA512, reserve=80） |
-| `export_all.py` | 全部会话批量导出（TXT/CSV/JSON + zstd 解码 + 群昵称解析） |
-| `export_chat.py` | 单会话导出工具（沿用上游） |
-| `config.py` | 配置加载，macOS/Windows/Linux 数据目录自动检测 |
-| `run.sh` | 一键全流程 |
+| `decrypt_db.py` | SQLCipher 4 逐页解密器 |
+| `export_all.py` | 全部会话批量导出 |
+| `export_chat.py` | 单会话导出（派生自上游项目） |
+| `config.py` | 配置加载与数据目录自动检测（macOS / Windows / Linux） |
+| `run.sh` | 全流程入口 |
 
-## 常见问题
+## 已知限制
 
-**Q: 密钥会变吗？什么时候要重抓？**
-已有数据库的密钥不变；微信更新、换设备登录、聊天记录从手机迁移（可能重建
-某些库，实测 `message_resource.db` 被换过密钥）后建议重跑 `./run.sh`。
+- `migrate/unspportmsg.db` 未获得密钥，不解密；不影响消息导出
+- 媒体文件（图片、语音、视频）本体不导出
+- 密钥在微信更新、账号切换、聊天记录迁移（曾观察到 `message_resource.db`
+  被重建并更换密钥）后可能变化，届时需重新运行 `./run.sh`
+- 仅在本机数据上验证过；其他环境如出现问题，参照下节排查
 
-**Q: 从手机迁移聊天记录到 Mac 后怎么办？**
-手机微信 → 设置 → 通用 → 聊天记录迁移与备份 → 迁移到电脑微信（聊天选全部、
-时间选全部时间）。迁完重跑 `./run.sh` 即可。
+## 故障排查
 
-**Q: `attach failed` / 抓不到任何密钥？**
-确认 (1) SIP 已关闭 `csrutil status`；(2) 微信正在运行；(3) 用的是本目录
-`.venv` 里的 frida；(4) 管理员密码已输入。仍失败时看 `hunt.log`。
+**`attach failed` 或未捕获任何密钥**
+确认：SIP 处于关闭状态；微信正在运行；管理员授权框未被取消。详细过程见
+`hunt.log`。
 
-**Q: map_keys 提示某些库未覆盖？**
-那些库本次会话未被微信打开。在微信里打开对应功能（通讯录/收藏/朋友圈等）
-或直接用 `--restart` 重跑；无关紧要的库（如 `migrate/unspportmsg.db`）可忽略。
+**`map_keys.py` 报告部分数据库未覆盖**
+这些数据库在抓取窗口内未被微信打开。使用 `--restart` 参数重跑
+`hunt_keys.py`，或在微信中打开对应功能（通讯录、收藏、朋友圈）后重跑。
 
-**Q: 导出的媒体消息是什么样？**
-图片/语音/视频等显示为 `[图片]` `[语音]` 占位符；媒体文件本体在微信数据目录
-的 `Message/` 下，后续版本可能支持关联导出。
+**聊天记录从手机迁移后**
+手机微信执行 设置 → 通用 → 聊天记录迁移与备份 → 迁移到电脑微信，
+聊天范围与时间范围均选择全部；完成后重新运行 `./run.sh`。迁移是否完整
+可通过对比导出索引 `index.csv` 中各会话的最早消息时间判断。
 
-**Q: 数据安全？**
-`all_keys.json`、`hunted_keys.txt`、`decrypted/`、`exported_all/` 均已在
-`.gitignore` 中，不会被误提交。密钥与聊天记录等同明文，注意保管。
+## 数据安全
+
+`config.json`、`all_keys.json`、`hunted_keys.txt`、`hunt.log`、`decrypted/`、
+`exported_all/` 均已列入 `.gitignore`，不会被提交。密钥文件与聊天记录
+等同明文，请妥善保管项目目录。
 
 ## 致谢
 
 - [ydotdog/wechat-export-macos](https://github.com/ydotdog/wechat-export-macos) —
-  解密器与导出工具基础（本仓库 decrypt_db / export_chat / config 由其派生，WTFPL）
+  解密器与导出工具基础（`decrypt_db.py`、`export_chat.py`、`config.py` 由其派生）
 - [Evanyuan-builder/wechat-4.1.10-macos-key](https://github.com/Evanyuan-builder/wechat-4.1.10-macos-key) —
-  CCCrypt hook 思路与寄存器布局（其 issue 记录了 4.1.10 密钥机制变化）
+  CommonCrypto 拦截思路与参数寄存器布局；其 issue 记录了 4.1.10 密钥机制变化
 - [Thearas/wechat-db-decrypt-macos](https://github.com/Thearas/wechat-db-decrypt-macos)、
   [TANGandXUE/wcdb-key-tool](https://github.com/TANGandXUE/wcdb-key-tool) —
   4.1+ 密钥机制变化的分析
-
-实测环境：微信 4.1.13 / macOS 27 (Apple Silicon) / SIP off —— 23 库 22 解密成功，
-358 会话 70 万条消息完整导出。
 
 ## License
 

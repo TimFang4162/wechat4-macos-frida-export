@@ -1,9 +1,9 @@
-# 用户数据与密钥 — 绝不入库
+# 密钥与用户数据 — 禁止提交
 config.json
 all_keys.json
 hunted_keys.txt
-hunt.log
 hunt.stop
+*.log
 decrypted/
 exported/
 exported_all/
