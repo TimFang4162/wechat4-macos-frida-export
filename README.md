@@ -1,4 +1,4 @@
-# wechat4-macos-export
+# wechat4-macos-frida-export
 
 macOS 平台微信（WeChat 4.x）本地聊天记录解密与导出工具。针对微信 4.1.10 起
 的密钥存储机制变更，采用 Frida 运行时拦截方式获取各数据库的 SQLCipher 密钥，
@@ -155,6 +155,20 @@ exported_all/
 - [Thearas/wechat-db-decrypt-macos](https://github.com/Thearas/wechat-db-decrypt-macos)、
   [TANGandXUE/wcdb-key-tool](https://github.com/TANGandXUE/wcdb-key-tool) —
   4.1+ 密钥机制变化的分析
+
+## 免责声明
+
+- 本项目仅面向导出使用者本人微信账号聊天记录的场景（个人备份、迁移与
+  数据留存），不用于获取他人数据
+- 使用者应确保行为符合所在司法辖区的法律法规，并自行承担使用本项目产生
+  的一切后果
+- 本项目以「按原样」（AS IS）提供，不附带任何形式的明示或默示担保，
+  作者不对任何直接或间接损失承担责任
+- 本项目与腾讯公司无关，未获腾讯公司授权或认可。拦截运行中的微信进程、
+  关闭 SIP 等操作可能违反《微信软件使用许可协议》或相关服务条款，理论上
+  存在账号被限制的风险，使用者应自行评估
+- 严禁将本项目用于未经授权访问他人账户、窃取他人数据、商业取证或其他
+  非法用途
 
 ## License
 
