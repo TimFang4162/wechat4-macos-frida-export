@@ -14,9 +14,7 @@ macOS 平台微信（WeChat 4.x）本地聊天记录解密与导出工具。针�
   进程内存；新版 macOS 的 App Management 亦不允许对 `/Applications` 下的
   微信原地重签名
 
-验证环境：微信 4.1.13，macOS 27（Apple Silicon），SIP 关闭。23 个数据库中
-22 个解密成功，358 个会话、约 70 万条消息完成导出。以上数据仅代表单一
-环境的测试结果。
+验证环境：微信 4.1.13，macOS 27（Apple Silicon），SIP 关闭。
 
 ## 工作原理
 
@@ -65,7 +63,7 @@ ParseTrieEntries`，栈溢出），进程附加阶段即失败。
 5. 运行 `decrypt_db.py`：解密全部数据库
 6. 运行 `export_all.py`：批量导出全部会话
 
-密钥未变化时（例如仅获取迁移后的新消息），可跳过抓取步骤：
+密钥未变化时，可跳过抓取步骤：
 
 ```bash
 ./run.sh --no-hunt
@@ -96,7 +94,7 @@ exported_all/
 
 导出内容说明：
 
-- 微信 4.x 约半数消息以 `WCDB_CT_message_content=4`（zstd）压缩存储，
+- 微信 4.x 部分消息以 `WCDB_CT_message_content=4`（zstd）压缩存储，
   导出时全部解压为文本，不产生占位符
 - 群聊发言人解析为联系人昵称；无法解析时保留 wxid
 - 发送者为本账号的消息标注为「我」。账号通过跨会话发送频率统计自动识别
@@ -121,8 +119,7 @@ exported_all/
 
 - `migrate/unspportmsg.db` 未获得密钥，不解密；不影响消息导出
 - 媒体文件（图片、语音、视频）本体不导出
-- 密钥在微信更新、账号切换、聊天记录迁移（曾观察到 `message_resource.db`
-  被重建并更换密钥）后可能变化，届时需重新运行 `./run.sh`
+- 密钥在微信更新、账号切换、聊天记录迁移后可能变化，届时需重新运行 `./run.sh`
 - 仅在本机数据上验证过；其他环境如出现问题，参照下节排查
 
 ## 故障排查
@@ -139,12 +136,6 @@ exported_all/
 手机微信执行 设置 → 通用 → 聊天记录迁移与备份 → 迁移到电脑微信，
 聊天范围与时间范围均选择全部；完成后重新运行 `./run.sh`。迁移是否完整
 可通过对比导出索引 `index.csv` 中各会话的最早消息时间判断。
-
-## 数据安全
-
-`config.json`、`all_keys.json`、`hunted_keys.txt`、`hunt.log`、`decrypted/`、
-`exported_all/` 均已列入 `.gitignore`，不会被提交。密钥文件与聊天记录
-等同明文，请妥善保管项目目录。
 
 ## 致谢
 
