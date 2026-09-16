@@ -109,9 +109,10 @@ exported_all/
 | `hunt_keys.py` | 密钥抓取器。非 root 运行时经 osascript 提权重启自身；支持重启微信、进程退出后自动重新附加、静默超时自动停止 |
 | `keyhunt_frida.js` | Frida 注入脚本，拦截 CommonCrypto 各入口并上报密钥与 KDF 参数 |
 | `map_keys.py` | 候选密钥逐库 HMAC-SHA512 验证，生成 `all_keys.json` |
-| `decrypt_db.py` | SQLCipher 4 逐页解密器 |
+| `decrypt_db.py` | SQLCipher 4 逐页解密器；合并 `-wal` 未落盘帧，`--db-dir` 可指定离线快照为源 |
 | `export_all.py` | 全部会话批量导出 |
 | `export_chat.py` | 单会话导出（派生自上游项目） |
+| `export_chats.py` | 指定会话导出（`--username` / `--name`，复用 export_all 的解析） |
 | `config.py` | 配置加载与数据目录自动检测（macOS / Windows / Linux） |
 | `run.sh` | 全流程入口 |
 

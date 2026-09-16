@@ -5,7 +5,7 @@ WeChat 4.x 数据库解密器
 参数: SQLCipher 4, AES-256-CBC, HMAC-SHA512, reserve=80, page_size=4096
 密钥来源: all_keys.json (由 hunt_keys.py 抓取、map_keys.py 映射)
 """
-import hashlib, struct, os, sys, json
+import argparse, hashlib, struct, os, sys, json
 import hmac as hmac_mod
 from Crypto.Cipher import AES
 
@@ -50,6 +50,66 @@ def decrypt_page(enc_key, page_data, pgno):
         cipher = AES.new(enc_key, AES.MODE_CBC, iv)
         decrypted = cipher.decrypt(encrypted)
         return decrypted + b'\x00' * RESERVE_SZ
+
+
+def _wal_cksum(s1, s2, data, big_endian):
+    fmt = ">%dI" if big_endian else "<%dI"
+    words = struct.unpack(fmt % (len(data) // 4), data)
+    for i in range(0, len(words), 2):
+        s1 = (s1 + words[i] + s2) & 0xFFFFFFFF
+        s2 = (s2 + words[i + 1] + s1) & 0xFFFFFFFF
+    return s1, s2
+
+
+def merge_wal(db_path, out_path, enc_key):
+    """把 -wal 中未合并进主文件的页解密后写入已解密库，否则最新消息会缺失。
+
+    按 SQLite 读端语义取舍帧：仅接受与 WAL 头同代 salt 且校验和连续成立的
+    帧，止于最后一个提交帧（帧头 dbsize>0）。
+    """
+    wal_path = db_path + "-wal"
+    if not os.path.exists(wal_path):
+        return
+    wal = open(wal_path, "rb").read()
+    if len(wal) < 32 + 24 + PAGE_SZ:
+        return
+    magic, _ver, page_sz, _ckpt, salt1, salt2, hc1, hc2 = struct.unpack(">8I", wal[:32])
+    if page_sz != PAGE_SZ:
+        print(f"  [WARN] WAL 页大小 {page_sz} != {PAGE_SZ}，跳过 WAL 合并")
+        return
+    if _wal_cksum(0, 0, wal[:24], magic & 1) != (hc1, hc2):
+        print("  [WARN] WAL 头校验和不符，跳过 WAL 合并")
+        return
+
+    frames, pending, commit_size = {}, [], 0
+    s1, s2 = hc1, hc2  # 帧校验和从 WAL 头校验和起链
+    off = 32
+    while off + 24 + PAGE_SZ <= len(wal):
+        pgno, dbsz, fs1, fs2, fc1, fc2 = struct.unpack(">6I", wal[off:off + 24])
+        if (fs1, fs2) != (salt1, salt2):
+            break  # 上一代残留帧
+        page = wal[off + 24: off + 24 + PAGE_SZ]
+        s1, s2 = _wal_cksum(s1, s2, wal[off:off + 8], magic & 1)
+        s1, s2 = _wal_cksum(s1, s2, page, magic & 1)
+        if (s1, s2) != (fc1, fc2):
+            break  # 撕裂/损坏的尾部
+        pending.append((pgno, page))
+        if dbsz > 0:
+            for p, pg in pending:
+                frames[p] = pg
+            commit_size = dbsz
+            pending = []
+        off += 24 + PAGE_SZ
+
+    if not frames:
+        return
+    with open(out_path, "r+b") as f:
+        for pgno, page in frames.items():
+            f.seek((pgno - 1) * PAGE_SZ)
+            f.write(decrypt_page(enc_key, page, pgno))
+        if commit_size:
+            f.truncate(commit_size * PAGE_SZ)
+    print(f"  WAL 合并: {len(frames)} 页")
 
 
 def decrypt_database(db_path, out_path, enc_key):
@@ -110,6 +170,12 @@ def main():
     print("  WeChat 4.x 数据库解密器")
     print("=" * 60)
 
+    parser = argparse.ArgumentParser(description="解密 SQLCipher 4 数据库")
+    parser.add_argument("--db-dir", default=None,
+                        help="覆盖 config 中的数据库源目录（如离线快照目录）")
+    args = parser.parse_args()
+    db_dir = args.db_dir or DB_DIR
+
     # 加载密钥
     if not os.path.exists(KEYS_FILE):
         print(f"[ERROR] 密钥文件不存在: {KEYS_FILE}")
@@ -122,15 +188,17 @@ def main():
     keys = strip_key_metadata(keys)
     print(f"\n加载 {len(keys)} 个数据库密钥")
     print(f"输出目录: {OUT_DIR}")
+    if db_dir != DB_DIR:
+        print(f"源目录: {db_dir}（快照）")
     os.makedirs(OUT_DIR, exist_ok=True)
 
     # 收集所有DB文件
     db_files = []
-    for root, dirs, files in os.walk(DB_DIR):
+    for root, dirs, files in os.walk(db_dir):
         for f in files:
             if f.endswith('.db') and not f.endswith('-wal') and not f.endswith('-shm'):
                 path = os.path.join(root, f)
-                rel = os.path.relpath(path, DB_DIR)
+                rel = os.path.relpath(path, db_dir)
                 sz = os.path.getsize(path)
                 db_files.append((rel, path, sz))
 
@@ -156,6 +224,7 @@ def main():
 
         ok = decrypt_database(path, out_path, enc_key)
         if ok:
+            merge_wal(path, out_path, enc_key)
             # SQLite验证
             try:
                 import sqlite3
