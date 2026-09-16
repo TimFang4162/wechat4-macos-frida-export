@@ -114,13 +114,13 @@ def sanitize(name, fallback):
     return name or fallback
 
 
-def export_one(username, display, contact_map, my_wxid, seen_dirs):
+def export_one(username, display, contact_map, my_wxid, seen_dirs, chats_dir=None):
     table = "Msg_" + hashlib.md5(username.encode()).hexdigest()
     out_name = sanitize(display, username)
     if out_name in seen_dirs:
         out_name = sanitize(f"{out_name}_{username}", username)
     seen_dirs.add(out_name)
-    out_dir = os.path.join(CHATS_DIR, out_name)
+    out_dir = os.path.join(chats_dir or CHATS_DIR, out_name)
     os.makedirs(out_dir, exist_ok=True)
 
     messages = []
