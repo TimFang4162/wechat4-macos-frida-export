@@ -48,28 +48,13 @@ const pbkdf = resolve('CCKeyDerivationPBKDF');
 if (pbkdf !== null) {
   Interceptor.attach(pbkdf, {
     onEnter(args) {
-      this.pw = args[1];
-      this.pwLen = args[2].toInt32();
-      this.salt = args[3];
-      this.saltLen = args[4].toInt32();
-      this.prf = args[5].toInt32();
-      this.rounds = args[6].toInt32();
-      this.dk = args[7];
-      // 9th arg (derivedKeyLen) lives on the stack at entry on arm64
-      try { this.dkLen = this.context.sp.readU64().toNumber(); } catch (e) { this.dkLen = -1; }
       try {
-        const pwHex = toHex(this.pw.readByteArray(Math.min(Math.max(this.pwLen, 0), 128)));
-        const saltHex = toHex(this.salt.readByteArray(Math.min(Math.max(this.saltLen, 0), 64)));
-        send('PBKDF pw=' + pwHex + ' pwLen=' + this.pwLen +
-             ' salt=' + saltHex + ' prf=' + this.prf + ' rounds=' + this.rounds +
-             ' dkLen=' + this.dkLen);
-      } catch (e) {}
-    },
-    onLeave(retval) {
-      try {
-        if (retval.toInt32() === 0 && !this.dk.isNull()) {
-          const n = this.dkLen > 0 && this.dkLen <= 128 ? this.dkLen : 64;
-          send('PBKDFDK dk=' + toHex(this.dk.readByteArray(n)));
+        const pwLen = args[2].toInt32();
+        const rounds = args[6].toInt32();
+        // SQLCipher 4 的 HMAC key 派生以 32-byte raw enc key 为 password，
+        // rounds=2。只读取该输入，不读取 ABI 相关栈参数或输出缓冲区。
+        if (pwLen === 32 && rounds === 2) {
+          logKey('CCKeyDerivationPBKDF', args[1], pwLen);
         }
       } catch (e) {}
     }

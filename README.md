@@ -10,11 +10,13 @@ macOS 平台微信（WeChat 4.x）本地聊天记录解密与导出工具。针�
 - 微信版本：4.x。重点针对 4.1.10 及以上版本。自该版本起，既有方法失效：
   进程内存中不再出现 `x'<key><salt>'` 形式的密钥字符串，内存扫描无结果；
   二进制中 SQLCipher 符号被完全剥离，`sqlite3_key` 断点无法解析
-- 系统完整性保护（SIP）须处于关闭状态。SIP 开启时外部进程无法读取微信
-  进程内存；新版 macOS 的 App Management 亦不允许对 `/Applications` 下的
-  微信原地重签名
+- 支持 SIP 保持开启。工具不再对官方微信执行外部 `task_for_pid` 附加，而是在
+  项目 `.runtime/` 下构建内嵌 Frida Gadget 的独立调试副本；
+  `/Applications/WeChat.app` 全程只读。调试副本使用独立 Bundle ID
+  `io.github.timfang4162.wechat4-macos-frida-export.sip`，避免与官方微信的
+  TCC 身份冲突
 
-验证环境：微信 4.1.13，macOS 27（Apple Silicon），SIP 关闭。
+验证环境：微信 4.1.13，macOS 27（Apple Silicon），SIP 开启。
 
 ## 工作原理
 
@@ -24,16 +26,21 @@ HMAC-SHA512、reserve=80、页大小 4096。每个数据库持有独立的 32 �
 4.1.10 起，raw key 不再以字符串形式驻留可扫描内存，仅在加解密调用时经过
 系统加密库。本工具的处理流程：
 
-1. 以 Frida 附加微信进程，拦截 CommonCrypto 的 `CCCrypt`、`CCCryptorCreate`、
-   `CCCryptorCreateWithMode` 与 `CCKeyDerivationPBKDF`。参数中的 32 字节密钥
-   即数据库 raw key（`CCKeyDerivationPBKDF` 的 password 参数为同一密钥，
-   用于派生 HMAC 校验密钥，rounds=2，SHA-512）
-2. 重启微信，使全部数据库重新打开；密钥在派生与使用时刻被记录至
+1. `prepare_sip_wechat.py` 复制官方微信，向双架构 Mach-O 加入
+   `LC_LOAD_DYLIB`，嵌入 Frida Gadget 并按嵌套代码对象恢复运行所需
+   entitlement 后执行严格重签名校验
+2. `hunt_keys.py` 在调试副本的独立容器内建立正式
+   `xwechat_files` 的 APFS 写时复制快照。这使调试副本打开与正式库
+   相同的密文数据，同时避免 macOS App Data 对跨容器符号链接的拒绝。
+   快照文件在首次修改前共享数据块，不会立即额外占用整个数据目录的空间
+3. Gadget 在 `127.0.0.1:27042` 等待控制器；控制器装载 Hook 后微信
+   才继续初始化。Hook 拦截 CommonCrypto 的 `CCCrypt`、`CCCryptorCreate`、
+   `CCCryptorCreateWithMode` 与 `CCKeyDerivationPBKDF`，将 32 字节 raw key 写入
    `hunted_keys.txt`
-3. 以候选密钥对各数据库首页做 HMAC-SHA512 校验，建立密钥与数据库的映射，
+4. 以候选密钥对各数据库首页做 HMAC-SHA512 校验，建立密钥与数据库的映射，
    生成 `all_keys.json`
-4. 按页解密数据库，输出明文 SQLite 至 `decrypted/`
-5. 批量读取全部会话，导出为 TXT / CSV / JSON
+5. 按页解密数据库，输出明文 SQLite 至 `decrypted/`
+6. 批量读取全部会话，导出为 TXT / CSV / JSON
 
 不使用 lldb 的原因：Xcode 自带的 lldb 在解析微信主程序 Mach-O 符号表时，
 因导出 trie 递归过深而崩溃（`ObjectFileMachO::ParseSymtab →
@@ -41,10 +48,13 @@ ParseTrieEntries`，栈溢出），进程附加阶段即失败。
 
 ## 环境要求
 
-- macOS，SIP 关闭（`csrutil status` 返回 disabled）
+- macOS，SIP 可保持开启（已在 `csrutil status` 为 enabled 时验证）
 - 微信 4.x 桌面版，处于已登录状态
 - Python 3.9+，Xcode Command Line Tools
-- 一次管理员密码输入（密钥抓取阶段通过系统授权框提权）
+- macOS 26/27：为运行本项目的终端/Codex授予“完全磁盘访问权限”，
+  以便控制端读取官方微信容器并建立本地快照。TCC 与 SIP 是两套机制
+- 调试副本使用独立签名身份，首次启动需单独扫码登录一次；后续运行复用该副本
+  的登录状态
 
 ## 使用方法
 
@@ -52,16 +62,29 @@ ParseTrieEntries`，栈溢出），进程附加阶段即失败。
 ./run.sh
 ```
 
+脚本会自动读取 `csrutil status`。SIP 开启时选择内嵌 Frida Gadget 链路，
+不调用 `task_for_pid`、不请求 root；SIP 关闭时仍复用同一 Gadget 链路，避免维护
+两套密钥抓取实现。除完全磁盘访问权限和首次独立登录外，无需手动选择运行模式。
+
+直接导出到桌面指定目录：
+
+```bash
+./run.sh --output ~/Desktop/WeChat-Export
+```
+
 `run.sh` 依次执行：
 
-1. 创建 `.venv` 并安装依赖（frida-tools、pycryptodome、zstandard）
-2. 自动检测微信数据目录，生成 `config.json`
-3. 运行 `hunt_keys.py`：弹出管理员授权框，Frida 附加微信进程并挂钩；
-   随后重启微信以触发全部数据库重新打开；连续 45 秒未出现新密钥时自动
-   停止并脱离。微信登录状态在重启后保留；若出现登录界面，手动确认一次
-4. 运行 `map_keys.py`：验证并映射密钥
-5. 运行 `decrypt_db.py`：解密全部数据库
-6. 运行 `export_all.py`：批量导出全部会话
+1. 自动识别 SIP 状态并选择无需 root 的内嵌 Gadget 链路
+2. 创建 `.venv` 并安装锁定版本的 Frida 客户端及解密依赖
+3. 自动检测微信数据目录，生成 `config.json`
+4. 运行 `prepare_sip_wechat.py`，生成 `.runtime/WeChat-SIP.app`。只有微信版本或
+   主程序摘要变化时才重建
+5. 运行 `hunt_keys.py`：正常退出官方微信，首次运行时建立 APFS 数据快照，
+   启动 Gadget 调试副本并在初始化前装载 Hook；如果独立登录态失效，
+   在弹出的调试副本中扫码一次。连续 45 秒未出现新密钥时自动停止
+6. 运行 `map_keys.py`：验证并映射密钥
+7. 运行 `decrypt_db.py`：解密全部数据库
+8. 运行 `export_all.py`：批量导出全部会话
 
 密钥未变化时，可跳过抓取步骤：
 
@@ -69,9 +92,19 @@ ParseTrieEntries`，栈溢出），进程附加阶段即失败。
 ./run.sh --no-hunt
 ```
 
+微信升级、账号切换、聊天记录迁移或密钥轮换后，刷新调试容器内的 APFS 快照：
+
+```bash
+./run.sh --refresh-snapshot --output ~/Desktop/WeChat-Export-New
+```
+
+`--refresh-snapshot` 会先完成新快照，再原子替换并清理旧快照，不能与
+`--no-hunt` 或 `--no-restart` 同时使用。运行 `./run.sh --help` 可查看全部参数。
+
 ### 分步执行
 
 ```bash
+.venv/bin/python prepare_sip_wechat.py    # 构建/更新 Gadget 调试副本
 .venv/bin/python hunt_keys.py --restart   # 抓取密钥
 .venv/bin/python map_keys.py              # 验证并映射
 .venv/bin/python decrypt_db.py            # 解密
@@ -106,8 +139,11 @@ exported_all/
 
 | 文件 | 说明 |
 |------|------|
-| `hunt_keys.py` | 密钥抓取器。非 root 运行时经 osascript 提权重启自身；支持重启微信、进程退出后自动重新附加、静默超时自动停止 |
-| `keyhunt_frida.js` | Frida 注入脚本，拦截 CommonCrypto 各入口并上报密钥与 KDF 参数 |
+| `prepare_sip_wechat.py` | SIP 模式构建器。下载锁定版本 Gadget、复制官方 App、注入、逐对象恢复必要 entitlement 并重签名 |
+| `inject_load_dylib.py` | 无第三方依赖的通用/单架构 Mach-O `LC_LOAD_DYLIB` 注入器 |
+| `check_macos_permissions.py` | 在执行导出前检查 Terminal/Codex 是否具备微信容器读取权限 |
+| `hunt_keys.py` | 无 root 的 Gadget 控制器；建立 APFS 数据快照，仅连接 loopback，负责启动副本与静默超时停止 |
+| `keyhunt_frida.js` | Gadget 脚本，拦截 CommonCrypto 各入口并上报 32 字节候选密钥 |
 | `map_keys.py` | 候选密钥逐库 HMAC-SHA512 验证，生成 `all_keys.json` |
 | `decrypt_db.py` | SQLCipher 4 逐页解密器；合并 `-wal` 未落盘帧，`--db-dir` 可指定离线快照为源 |
 | `export_all.py` | 全部会话批量导出 |
@@ -121,13 +157,25 @@ exported_all/
 - `migrate/unspportmsg.db` 未获得密钥，不解密；不影响消息导出
 - 媒体文件（图片、语音、视频）本体不导出
 - 密钥在微信更新、账号切换、聊天记录迁移后可能变化，届时需重新运行 `./run.sh`
+- 调试副本为 ad-hoc 签名，不应替代官方微信长期日常使用；官方 App 不会被修改
+- APFS 快照是抓取密钥时的数据视图；微信升级、账号迁移或密钥变化后需使用
+  `--refresh-snapshot` 更新
 - 仅在本机数据上验证过；其他环境如出现问题，参照下节排查
 
 ## 故障排查
 
-**`attach failed` 或未捕获任何密钥**
-确认：SIP 处于关闭状态；微信正在运行；管理员授权框未被取消。详细过程见
-`hunt.log`。
+**Gadget 在微信初始化阶段断开**
+在“系统设置 → 隐私与安全性 → 完全磁盘访问权限”中添加
+当前运行项目的 Terminal/Codex。重新授权后需先退出残留微信进程再运行。
+详细过程见 `hunt.log`。
+
+**微信提示“储存位置不可用”**
+旧版调试容器中可能保留了跨容器符号链接。退出调试副本并重新运行
+`./run.sh`；新流程会撤销该链接并自动建立 APFS 写时复制快照。
+
+**无法连接 `127.0.0.1:27042`**
+确认没有其他 Frida 服务占用端口，并运行
+`.venv/bin/python prepare_sip_wechat.py --force` 重建签名树。
 
 **`map_keys.py` 报告部分数据库未覆盖**
 这些数据库在抓取窗口内未被微信打开。使用 `--restart` 参数重跑
@@ -156,8 +204,8 @@ exported_all/
   的一切后果
 - 本项目以「按原样」（AS IS）提供，不附带任何形式的明示或默示担保，
   作者不对任何直接或间接损失承担责任
-- 本项目与腾讯公司无关，未获腾讯公司授权或认可。拦截运行中的微信进程、
-  关闭 SIP 等操作可能违反《微信软件使用许可协议》或相关服务条款，理论上
+- 本项目与腾讯公司无关，未获腾讯公司授权或认可。运行重签名调试副本、
+  拦截微信进程等操作可能违反《微信软件使用许可协议》或相关服务条款，理论上
   存在账号被限制的风险，使用者应自行评估
 - 严禁将本项目用于未经授权访问他人账户、窃取他人数据、商业取证或其他
   非法用途

@@ -7,13 +7,17 @@
   - 账号主人自动识别（跨会话出现频率最高的发送者）
   - 输出 index.csv 总索引
 """
+import argparse
 import csv
 import hashlib
 import io
 import json
 import os
+import pathlib
 import re
+import shutil
 import sqlite3
+import tempfile
 from collections import Counter
 from datetime import datetime, timezone, timedelta
 
@@ -25,8 +29,7 @@ _cfg = load_config()
 BASE = os.path.dirname(os.path.abspath(__file__))
 DECRYPTED_DIR = _cfg["decrypted_dir"]
 CONTACT_DB = os.path.join(DECRYPTED_DIR, "contact", "contact.db")
-OUT_ROOT = os.path.join(BASE, "exported_all")
-CHATS_DIR = os.path.join(OUT_ROOT, "chats")
+DEFAULT_OUT_ROOT = os.path.join(BASE, "exported_all")
 CST = timezone(timedelta(hours=8))
 
 MSG_TYPES = {
@@ -120,7 +123,9 @@ def export_one(username, display, contact_map, my_wxid, seen_dirs, chats_dir=Non
     if out_name in seen_dirs:
         out_name = sanitize(f"{out_name}_{username}", username)
     seen_dirs.add(out_name)
-    out_dir = os.path.join(chats_dir or CHATS_DIR, out_name)
+    if chats_dir is None:
+        raise ValueError("chats_dir is required")
+    out_dir = os.path.join(chats_dir, out_name)
     os.makedirs(out_dir, exist_ok=True)
 
     messages = []
@@ -195,7 +200,60 @@ def export_one(username, display, contact_map, my_wxid, seen_dirs, chats_dir=Non
 
 
 def main():
-    os.makedirs(CHATS_DIR, exist_ok=True)
+    parser = argparse.ArgumentParser(description="批量导出全部微信会话")
+    parser.add_argument(
+        "--output", default=DEFAULT_OUT_ROOT,
+        help="导出目录（默认: 项目目录/exported_all）")
+    args = parser.parse_args()
+
+    # 聊天记录包含敏感数据；新建目录/文件仅允许当前用户访问。
+    os.umask(0o077)
+    final_root = pathlib.Path(args.output).expanduser().absolute()
+    protected = {
+        pathlib.Path("/").resolve(),
+        pathlib.Path.home().resolve(),
+        (pathlib.Path.home() / "Desktop").resolve(),
+        pathlib.Path(BASE).resolve(),
+    }
+    if final_root.resolve(strict=False) in protected:
+        parser.error(f"拒绝使用受保护目录作为导出目标: {final_root}")
+    if final_root.is_symlink():
+        parser.error(f"导出目标不能是符号链接: {final_root}")
+    if final_root.exists() and not final_root.is_dir():
+        parser.error(f"导出目标已存在且不是目录: {final_root}")
+
+    final_root.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    staging = pathlib.Path(tempfile.mkdtemp(
+        prefix=f".{final_root.name}.tmp-", dir=final_root.parent))
+    out_root = str(staging)
+    chats_dir = str(staging / "chats")
+    os.makedirs(chats_dir, mode=0o700, exist_ok=True)
+
+    try:
+        export_all(out_root, chats_dir)
+        previous = None
+        if final_root.exists():
+            previous = final_root.with_name(
+                f".{final_root.name}.previous-{os.getpid()}")
+            if previous.exists():
+                raise RuntimeError(f"临时备份路径已存在: {previous}")
+            final_root.rename(previous)
+        try:
+            staging.rename(final_root)
+        except Exception:
+            if previous is not None:
+                previous.rename(final_root)
+            raise
+        if previous is not None:
+            shutil.rmtree(previous, ignore_errors=True)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+
+    print(f"[+] 输出目录: {final_root}")
+
+
+def export_all(out_root, chats_dir):
     contact_map = load_contact_map()
     print(f"[+] 联系人表: {len(contact_map)} 条")
 
@@ -228,7 +286,8 @@ def main():
     for username in usernames:
         display = contact_map.get(username, username)
         try:
-            info = export_one(username, display, contact_map, my_wxid, seen_dirs)
+            info = export_one(
+                username, display, contact_map, my_wxid, seen_dirs, chats_dir)
         except Exception as e:
             print(f"[!] {username} 导出失败: {e}")
             continue
@@ -243,7 +302,7 @@ def main():
             print(f"  已导出 {done}/{len(usernames)}")
 
     index_rows.sort(key=lambda r: -r["消息数"])
-    with open(os.path.join(OUT_ROOT, "index.csv"), "w",
+    with open(os.path.join(out_root, "index.csv"), "w",
               encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(
             f, fieldnames=["显示名", "用户名", "消息数", "开始", "结束", "目录"])
@@ -252,7 +311,6 @@ def main():
 
     total = sum(r["消息数"] for r in index_rows)
     print(f"\n[+] 导出完成: {len(index_rows)} 个会话, 共 {total} 条消息")
-    print(f"[+] 输出目录: {OUT_ROOT}")
 
 
 if __name__ == "__main__":

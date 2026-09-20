@@ -70,6 +70,7 @@ def main():
 
     with open(out_file, "w") as f:
         json.dump(mapping, f, indent=4, ensure_ascii=False)
+    os.chmod(out_file, 0o600)
 
     print(f"[+] 匹配 {len(mapping)}/{len(db_files)} 个数据库，已写入 {out_file}")
     missing = [d for d in sorted(db_files) if d not in mapping]
