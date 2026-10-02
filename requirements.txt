@@ -1,3 +1,4 @@
-frida-tools
+frida==17.18.0
+frida-tools==14.10.4
 pycryptodome>=3.20
 zstandard>=0.22
