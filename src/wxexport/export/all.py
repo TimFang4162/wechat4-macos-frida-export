@@ -2,16 +2,16 @@
 """批量导出全部会话 — TXT/CSV/JSON 三种格式。
 
 特性：
-  - zstd 压缩消息解码（微信 4.x 约一半消息为 WCDB_CT=4 压缩存储）
-  - 消息类型解码与 appmsg 内容渲染（wxexport.msgparse）
+  - 消息解析为结构化模型（wxexport.msgparse）：content 可读文本 + detail
+    无损字段（聊天记录子项时间、引用原文、转账留言等），JSON/CSV 完整保留
   - 群聊发言人解析为昵称（通过联系人库）
   - 账号主人自动识别（跨会话出现频率最高的发送者）
+  - 按 (create_time, sort_seq) 稳定排序
   - 输出 index.csv 总索引
 """
 import argparse
 import csv
 import hashlib
-import io
 import json
 import os
 import pathlib
@@ -22,19 +22,14 @@ import tempfile
 from collections import Counter
 from datetime import datetime, timezone, timedelta
 
-import zstandard
-
 from wxexport.config import PROJECT_ROOT, load_config
-from wxexport.msgparse import (SYSTEM_TYPES, decode_local_type,
-                               render_message, strip_sender_prefix, type_name)
+from wxexport.msgparse import SYSTEM_TYPES, parse_message
 
 _cfg = load_config()
 DECRYPTED_DIR = _cfg["decrypted_dir"]
 CONTACT_DB = os.path.join(DECRYPTED_DIR, "contact", "contact.db")
 DEFAULT_OUT_ROOT = os.path.join(PROJECT_ROOT, "exported_all")
 CST = timezone(timedelta(hours=8))
-
-_zdec = zstandard.ZstdDecompressor()
 
 
 def get_message_dbs():
@@ -90,22 +85,6 @@ def detect_my_wxid():
     return wxid, n
 
 
-def decode_content(raw, ct, type_name):
-    if raw is None:
-        return None
-    if isinstance(raw, bytes):
-        if ct == 4:
-            try:
-                raw = _zdec.stream_reader(io.BytesIO(raw)).read()
-            except zstandard.ZstdError:
-                return "[无法解压的消息]"
-        try:
-            return raw.decode("utf-8", errors="replace")
-        except Exception:
-            return f"[{type_name}]"
-    return raw
-
-
 def sanitize(name, fallback):
     name = re.sub(r'[\\/:*?"<>|\r\n\t]', "_", name).strip(" .")[:80]
     return name or fallback
@@ -133,21 +112,21 @@ def export_one(username, display, contact_map, my_wxid, seen_dirs, chats_dir=Non
                 pass
             try:
                 rows = conn.execute(f"""
-                    SELECT local_type, create_time, real_sender_id,
+                    SELECT local_id, server_id, local_type, sort_seq,
+                           create_time, real_sender_id,
                            message_content, WCDB_CT_message_content
-                    FROM {table} ORDER BY create_time ASC
+                    FROM {table} ORDER BY create_time ASC, sort_seq ASC
                 """).fetchall()
             except sqlite3.Error:
                 rows = []
         finally:
             conn.close()
         is_chatroom = username.endswith("@chatroom")
-        for type_id, ts, sender_id, content, ct in rows:
-            base, sub = decode_local_type(type_id)
+        for local_id, server_id, type_id, sort_seq, ts, sender_id, content, ct in rows:
             sender_wxid = name2id.get(sender_id, "")
             if my_wxid and sender_wxid == my_wxid:
                 sender = "我"
-            elif base in SYSTEM_TYPES:
+            elif type_id & 0xFFFFFFFF in SYSTEM_TYPES:
                 sender = "系统"
             elif sender_wxid and sender_wxid in contact_map:
                 sender = contact_map[sender_wxid]
@@ -155,25 +134,25 @@ def export_one(username, display, contact_map, my_wxid, seen_dirs, chats_dir=Non
                 sender = sender_wxid
             else:
                 sender = display
-            tname = type_name(base, sub, type_id)
-            text = decode_content(content, ct, tname)
-            if is_chatroom:
-                text = strip_sender_prefix(text)
-            text = render_message(base, sub, text)
-            if not text:
-                text = f"[{tname}]"
+            parsed = parse_message(type_id, content, ct, is_chatroom)
             messages.append({
                 "time": datetime.fromtimestamp(ts, tz=CST).strftime(
                     "%Y-%m-%d %H:%M:%S") if ts else "",
                 "timestamp": ts,
+                "sort_seq": sort_seq,
+                "local_id": local_id,
+                "server_id": server_id,
                 "sender": sender,
+                "sender_wxid": sender_wxid or None,
+                "is_self": bool(my_wxid and sender_wxid == my_wxid),
                 "type": type_id,
-                "subtype": sub,
-                "type_name": tname,
-                "content": text,
+                "subtype": parsed["sub"],
+                "type_name": parsed["type_name"],
+                "content": parsed["content"],
+                "detail": parsed["detail"],
             })
 
-    messages.sort(key=lambda x: x["timestamp"] or 0)
+    messages.sort(key=lambda x: (x["timestamp"] or 0, x["sort_seq"] or 0))
     if not messages:
         return None
 
@@ -188,9 +167,12 @@ def export_one(username, display, contact_map, my_wxid, seen_dirs, chats_dir=Non
     with open(os.path.join(out_dir, "chat.csv"), "w", encoding="utf-8-sig",
               newline="") as f:
         w = csv.writer(f)
-        w.writerow(["时间", "发送者", "类型", "内容"])
+        w.writerow(["时间", "发送者", "发送者wxid", "类型", "子类型", "内容", "详情"])
         for m in messages:
-            w.writerow([m["time"], m["sender"], m["type_name"], m["content"]])
+            detail = json.dumps(m["detail"], ensure_ascii=False,
+                                separators=(",", ":")) if m["detail"] else ""
+            w.writerow([m["time"], m["sender"], m["sender_wxid"] or "",
+                        m["type_name"], m["subtype"], m["content"], detail])
 
     with open(os.path.join(out_dir, "chat.json"), "w", encoding="utf-8") as f:
         json.dump(messages, f, ensure_ascii=False)
