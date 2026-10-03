@@ -2,8 +2,8 @@
 """通过内嵌 Frida Gadget 抓取微信 4.x 的 SQLCipher raw key。
 
 该传输层不调用 task_for_pid，不需要 root，也不依赖关闭 SIP。微信调试副本由
-prepare_sip_wechat.py 构建；Gadget 仅监听 127.0.0.1，并在初始化阶段等待本脚本
-装载 keyhunt_frida.js。
+wxexport.sip.prepare 构建；Gadget 仅监听 127.0.0.1，并在初始化阶段等待本脚本
+装载 hook.js。
 """
 
 import argparse
@@ -18,14 +18,15 @@ import sys
 import time
 from datetime import datetime
 
-from sip_config import (
-    BASE, DEBUG_XWECHAT_FILES, DEFAULT_TARGET, OFFICIAL_XWECHAT_FILES,
+from wxexport.config import PROJECT_ROOT
+from wxexport.sip.config import (
+    DEBUG_XWECHAT_FILES, DEFAULT_TARGET, OFFICIAL_XWECHAT_FILES,
 )
 
-SCRIPT_JS = BASE / "keyhunt_frida.js"
-OUT = BASE / "hunted_keys.txt"
-LOG_PATH = BASE / "hunt.log"
-STOP = BASE / "hunt.stop"
+SCRIPT_JS = pathlib.Path(__file__).resolve().parent / "hook.js"
+OUT = PROJECT_ROOT / "hunted_keys.txt"
+LOG_PATH = PROJECT_ROOT / "hunt.log"
+STOP = PROJECT_ROOT / "hunt.stop"
 DEFAULT_APP = DEFAULT_TARGET
 GADGET_LOAD = "@executable_path/../Frameworks/FridaGadget.dylib"
 
@@ -68,9 +69,9 @@ def validate_app(app):
     executable = app / "Contents" / "MacOS" / "WeChat"
     gadget = app / "Contents" / "Frameworks" / "FridaGadget.dylib"
     if not executable.is_file() or not gadget.is_file():
-        raise RuntimeError(
-            f"SIP 调试副本不存在或不完整: {app}\n"
-            "请先运行 .venv/bin/python prepare_sip_wechat.py")
+            raise RuntimeError(
+                f"SIP 调试副本不存在或不完整: {app}\n"
+                "请先运行: uv run python -m wxexport.sip.prepare")
     listing = subprocess.run(
         ["otool", "-L", executable], check=True,
         capture_output=True, text=True).stdout

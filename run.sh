@@ -86,40 +86,40 @@ case "$SIP_OUTPUT" in
 esac
 export SIP_STATUS
 
-# 1. 虚拟环境与依赖
-if [ ! -x .venv/bin/python ]; then
-    echo "[*] 创建虚拟环境并安装依赖 ..."
-    python3 -m venv .venv
-    .venv/bin/pip install -q -r requirements.txt
+# 1. 虚拟环境与依赖（uv 托管）
+if ! command -v uv >/dev/null 2>&1; then
+    echo "[!] 未找到 uv，请先安装: curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
+    exit 1
 fi
-PY=.venv/bin/python
+uv sync --frozen --quiet
+PY="$PWD/.venv/bin/python"
 
 # 2. 官方 /Applications/WeChat.app 仅作为只读源，调试副本放在 .runtime。
 if [ "$NO_HUNT" -eq 0 ]; then
-    "$PY" prepare_sip_wechat.py
+    "$PY" -m wxexport.sip.prepare
 fi
 
 # 3. TCC/App Data 权限预检及数据目录检测
-"$PY" check_macos_permissions.py
-"$PY" -c "from config import load_config; load_config()"
+"$PY" -m wxexport.check_permissions
+"$PY" -c "from wxexport.config import load_config; load_config()"
 
 # 4. Gadget 抓取
 if [ "$NO_HUNT" -eq 0 ]; then
     if [ "$NO_RESTART" -eq 1 ]; then
-        "$PY" hunt_keys.py --timeout 180
+        "$PY" -m wxexport.keys.hunt --timeout 180
     else
         HUNT_ARGS=(--restart)
         if [ "$REFRESH_SNAPSHOT" -eq 1 ]; then
             HUNT_ARGS+=(--refresh-snapshot)
         fi
-        "$PY" hunt_keys.py "${HUNT_ARGS[@]}"
+        "$PY" -m wxexport.keys.hunt "${HUNT_ARGS[@]}"
     fi
 fi
 
 # 5. 密钥映射 → 解密 → 批量导出
-"$PY" map_keys.py
-"$PY" decrypt_db.py
-"$PY" export_all.py --output "$OUTPUT_DIR"
+"$PY" -m wxexport.keys.map
+"$PY" -m wxexport.decrypt
+"$PY" -m wxexport.export.all --output "$OUTPUT_DIR"
 
 OUTPUT_ABS=$("$PY" -c 'import os,sys; print(os.path.abspath(os.path.expanduser(sys.argv[1])))' "$OUTPUT_DIR")
 

@@ -13,11 +13,11 @@ import subprocess
 import sys
 import tempfile
 
-from inject_load_dylib import inject
-from sip_config import (
-    BASE, DEBUG_BUNDLE_ID, DEBUG_BUNDLE_NAME, DEFAULT_SOURCE,
+from wxexport.sip.config import (
+    DEBUG_BUNDLE_ID, DEBUG_BUNDLE_NAME, DEFAULT_SOURCE,
     DEFAULT_TARGET, RUNTIME,
 )
+from wxexport.sip.macho_inject import inject
 
 GADGET_VERSION = "17.18.0"
 GADGET_SHA256 = "7b2f0b21f8de23c00531355703ca99a99a39b06ec534d1fabf27aca87a765c81"

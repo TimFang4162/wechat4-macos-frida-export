@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""密钥映射 — 把 hunt_keys.py 抓到的候选密钥逐一验证并映射到数据库，
-生成 decrypt_db.py 使用的 all_keys.json。
+"""密钥映射 — 把 hunt 抓到的候选密钥逐一验证并映射到数据库，
+生成 decrypt 使用的 all_keys.json。
 
 验证方式与解密器一致：用候选 enc_key 派生 mac key（PBKDF2-SHA512,
 salt^0x3a, 2 轮），对数据库第 1 页做 HMAC-SHA512 校验。
@@ -14,7 +14,7 @@ import os
 import re
 import struct
 
-from config import load_config
+from wxexport.config import PROJECT_ROOT, load_config
 
 PAGE_SZ, KEY_SZ, SALT_SZ, IV_SZ, HMAC_SZ, RESERVE_SZ = 4096, 32, 16, 16, 64, 80
 
@@ -32,18 +32,17 @@ def page1_hmac_ok(enc_key, page1):
 def main():
     cfg = load_config()
     db_dir = cfg["db_dir"]
-    base = os.path.dirname(os.path.abspath(__file__))
-    hunted = os.path.join(base, "hunted_keys.txt")
-    hunt_log = os.path.join(base, "hunt.log")
+    hunted = PROJECT_ROOT / "hunted_keys.txt"
+    hunt_log = PROJECT_ROOT / "hunt.log"
     out_file = cfg["keys_file"]
 
-    if not os.path.exists(hunted):
-        print(f"[ERROR] 未找到 {hunted}，请先运行 hunt_keys.py")
+    if not hunted.exists():
+        print(f"[ERROR] 未找到 {hunted}，请先运行 wxexport.keys.hunt")
         raise SystemExit(1)
 
-    keys = [bytes.fromhex(l.strip()) for l in open(hunted) if l.strip()]
+    keys = [bytes.fromhex(l.strip()) for l in hunted.read_text().splitlines() if l.strip()]
     try:
-        for m in re.finditer(r"PBKDF pw=([0-9a-f]{64}) ", open(hunt_log).read()):
+        for m in re.finditer(r"PBKDF pw=([0-9a-f]{64}) ", hunt_log.read_text()):
             keys.append(bytes.fromhex(m.group(1)))
     except FileNotFoundError:
         pass
@@ -75,7 +74,7 @@ def main():
     print(f"[+] 匹配 {len(mapping)}/{len(db_files)} 个数据库，已写入 {out_file}")
     missing = [d for d in sorted(db_files) if d not in mapping]
     if missing:
-        print(f"[!] 未覆盖 {len(missing)} 个（缺少密钥的库可在微信中打开对应功能后重跑 hunt_keys.py）:")
+        print(f"[!] 未覆盖 {len(missing)} 个（缺少密钥的库可在微信中打开对应功能后重跑 wxexport.keys.hunt）:")
         for d in missing:
             print(f"    {d}")
 

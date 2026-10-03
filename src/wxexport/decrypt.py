@@ -3,7 +3,7 @@ WeChat 4.x 数据库解密器
 
 使用抓取到的 per-DB enc_key 解密 SQLCipher 4 加密的数据库
 参数: SQLCipher 4, AES-256-CBC, HMAC-SHA512, reserve=80, page_size=4096
-密钥来源: all_keys.json (由 hunt_keys.py 抓取、map_keys.py 映射)
+密钥来源: all_keys.json (由 wxexport.keys.hunt 抓取、wxexport.keys.map 映射)
 """
 import argparse, hashlib, struct, os, sys, json
 import hmac as hmac_mod
@@ -20,8 +20,8 @@ HMAC_SZ = 64
 RESERVE_SZ = 80  # IV(16) + HMAC(64)
 SQLITE_HDR = b'SQLite format 3\x00'
 
-from config import load_config
-from key_utils import get_key_info, strip_key_metadata
+from wxexport.config import load_config
+from wxexport.keys.utils import get_key_info, strip_key_metadata
 _cfg = load_config()
 DB_DIR = _cfg["db_dir"]
 OUT_DIR = _cfg["decrypted_dir"]
@@ -179,7 +179,7 @@ def main():
     # 加载密钥
     if not os.path.exists(KEYS_FILE):
         print(f"[ERROR] 密钥文件不存在: {KEYS_FILE}")
-        print("请先运行 hunt_keys.py 和 map_keys.py（或直接运行 ./run.sh）")
+        print("请先运行 wxexport.keys.hunt 和 wxexport.keys.map（或直接运行 ./run.sh）")
         sys.exit(1)
 
     with open(KEYS_FILE) as f:

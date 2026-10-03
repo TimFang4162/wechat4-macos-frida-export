@@ -3,6 +3,7 @@
 
 特性：
   - zstd 压缩消息解码（微信 4.x 约一半消息为 WCDB_CT=4 压缩存储）
+  - 消息类型解码与 appmsg 内容渲染（wxexport.msgparse）
   - 群聊发言人解析为昵称（通过联系人库）
   - 账号主人自动识别（跨会话出现频率最高的发送者）
   - 输出 index.csv 总索引
@@ -23,22 +24,15 @@ from datetime import datetime, timezone, timedelta
 
 import zstandard
 
-from config import load_config
+from wxexport.config import PROJECT_ROOT, load_config
+from wxexport.msgparse import (SYSTEM_TYPES, decode_local_type,
+                               render_message, strip_sender_prefix, type_name)
 
 _cfg = load_config()
-BASE = os.path.dirname(os.path.abspath(__file__))
 DECRYPTED_DIR = _cfg["decrypted_dir"]
 CONTACT_DB = os.path.join(DECRYPTED_DIR, "contact", "contact.db")
-DEFAULT_OUT_ROOT = os.path.join(BASE, "exported_all")
+DEFAULT_OUT_ROOT = os.path.join(PROJECT_ROOT, "exported_all")
 CST = timezone(timedelta(hours=8))
-
-MSG_TYPES = {
-    1: "文本", 3: "图片", 34: "语音", 42: "名片", 43: "视频",
-    47: "表情", 48: "位置", 49: "链接/文件/小程序", 50: "语音/视频通话",
-    51: "系统消息", 10000: "系统提示", 10002: "撤回消息",
-}
-MEDIA_TYPES = {3, 34, 43, 47}
-SYSTEM_TYPES = {10000, 10002, 51}
 
 _zdec = zstandard.ZstdDecompressor()
 
@@ -147,11 +141,13 @@ def export_one(username, display, contact_map, my_wxid, seen_dirs, chats_dir=Non
                 rows = []
         finally:
             conn.close()
+        is_chatroom = username.endswith("@chatroom")
         for type_id, ts, sender_id, content, ct in rows:
+            base, sub = decode_local_type(type_id)
             sender_wxid = name2id.get(sender_id, "")
             if my_wxid and sender_wxid == my_wxid:
                 sender = "我"
-            elif type_id in SYSTEM_TYPES:
+            elif base in SYSTEM_TYPES:
                 sender = "系统"
             elif sender_wxid and sender_wxid in contact_map:
                 sender = contact_map[sender_wxid]
@@ -159,17 +155,21 @@ def export_one(username, display, contact_map, my_wxid, seen_dirs, chats_dir=Non
                 sender = sender_wxid
             else:
                 sender = display
-            type_name = MSG_TYPES.get(type_id, f"未知({type_id})")
-            text = decode_content(content, ct, type_name)
-            if type_id in MEDIA_TYPES or not text:
-                text = f"[{type_name}]"
+            tname = type_name(base, sub, type_id)
+            text = decode_content(content, ct, tname)
+            if is_chatroom:
+                text = strip_sender_prefix(text)
+            text = render_message(base, sub, text)
+            if not text:
+                text = f"[{tname}]"
             messages.append({
                 "time": datetime.fromtimestamp(ts, tz=CST).strftime(
                     "%Y-%m-%d %H:%M:%S") if ts else "",
                 "timestamp": ts,
                 "sender": sender,
                 "type": type_id,
-                "type_name": type_name,
+                "subtype": sub,
+                "type_name": tname,
                 "content": text,
             })
 
@@ -213,7 +213,7 @@ def main():
         pathlib.Path("/").resolve(),
         pathlib.Path.home().resolve(),
         (pathlib.Path.home() / "Desktop").resolve(),
-        pathlib.Path(BASE).resolve(),
+        pathlib.Path(PROJECT_ROOT).resolve(),
     }
     if final_root.resolve(strict=False) in protected:
         parser.error(f"拒绝使用受保护目录作为导出目标: {final_root}")

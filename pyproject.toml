@@ -1,0 +1,15 @@
+[project]
+name = "wxexport"
+version = "1.0.0"
+description = "macOS 微信 4.x 本地聊天记录解密与导出"
+requires-python = ">=3.10"
+license = { text = "WTFPL" }
+dependencies = [
+    "frida==17.18.0",
+    "pycryptodome>=3.20",
+    "zstandard>=0.22",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
